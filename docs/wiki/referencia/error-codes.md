@@ -168,6 +168,49 @@ docker-compose exec evolution-go nc -zv postgres 5432
 
 ## Erros de Negócio
 
+### WhatsApp 463 NackCallerReachoutTimelocked
+
+```json
+{
+  "error": "server returned error 463"
+}
+```
+
+**Causa**: o WhatsApp rejeitou o envio com `NackCallerReachoutTimelocked`. Isso pode acontecer por limitação real da conta, mas também ocorre quando uma mensagem 1:1 para contato frio sai sem os campos de privacidade esperados (`tctoken` ou `cstoken`).
+
+**Mitigação implementada**:
+- O envio 1:1 usa o caminho nativo do `whatsmeow`, que anexa `<tctoken>` quando existe token salvo e usa `<cstoken>` como fallback quando há `NCTSalt`.
+- Ao conectar, se `whatsmeow_nct_salt` estiver vazio, a instância força uma sincronização `regular_high` uma vez por processo para tentar receber `nct_salt_sync`.
+- O bootstrap não roda em loop para contas em que o servidor não provisiona NCT salt.
+
+**Diagnóstico PostgreSQL**:
+
+```sql
+-- Confirma se a instância possui NCT salt para gerar cstoken.
+SELECT our_jid, octet_length(salt) AS salt_bytes
+FROM whatsmeow_nct_salt
+WHERE our_jid = 'NUMERO_DA_INSTANCIA@s.whatsapp.net';
+
+-- Confirma se há tctoken salvo para o contato.
+SELECT our_jid, their_jid, octet_length(token) AS token_bytes, timestamp, sender_timestamp
+FROM whatsmeow_privacy_tokens
+WHERE our_jid = 'NUMERO_DA_INSTANCIA@s.whatsapp.net'
+  AND their_jid IN ('CONTATO@s.whatsapp.net', 'CONTATO@lid');
+
+-- Confirma se há mapeamento PN/LID, necessário para cstoken em contas LID.
+SELECT pn, lid
+FROM whatsmeow_lid_map
+WHERE pn = 'CONTATO' OR lid = 'CONTATO';
+```
+
+**Logs esperados**:
+- `NCT salt already stored, skipping bootstrap`: a instância já consegue gerar `cstoken`.
+- `NCT salt missing, forcing regular_high app-state sync`: a instância antiga iniciou backfill.
+- `NCT salt stored after regular_high sync`: o backfill funcionou.
+- `NCT salt still missing after regular_high sync`: o servidor não enviou sal; se o erro persistir, trate como limitação real da conta ou falta de provisionamento do WhatsApp.
+
+**Limite operacional**: esta mitigação não burla banimento, restrição de conta ou reach-out time-lock legítimo aplicado pelo WhatsApp. Se o erro continuar mesmo com `<tctoken>` ou `<cstoken>` presente no stanza, a causa provável é política/limitação do servidor.
+
 ### User Not Found on WhatsApp
 
 ```json

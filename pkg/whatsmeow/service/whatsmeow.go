@@ -130,6 +130,7 @@ type MyClient struct {
 	loggerWrapper      *logger_wrapper.LoggerManager
 	qrcodeCount        int
 	passkeyCeremony    *ceremony.Store
+	nctSaltBootstrap   nctSaltBootstrapper
 }
 
 func (mycli *MyClient) persistMessageAsync(message message_model.Message) {
@@ -918,6 +919,9 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 		}
 	case *events.Connected, *events.PushNameSetting:
 		mycli.loggerWrapper.GetLogger(mycli.userID).LogInfo("[%s] events.Connected to Whatsapp for user '%s'", mycli.userID, mycli.WAClient.Store.PushName)
+		if _, ok := rawEvt.(*events.Connected); ok {
+			mycli.ensureNCTSaltSyncedAsync()
+		}
 		if len(mycli.WAClient.Store.PushName) > 0 {
 			doWebhook = true
 			postMap["event"] = "Connected"

@@ -1,5 +1,22 @@
 # Evolution GO - Changelog
 
+## Unreleased
+
+### Bug Fixes
+- **Mitigate false `463 NackCallerReachoutTimelocked` errors on cold 1:1 sends** — bumped
+  `go.mau.fi/whatsmeow` to pseudo-version `20260730092514-662ad1dc6900`, preserving upstream
+  `tctoken`/`cstoken` lifecycle support and newer LID/PN send handling. On
+  `events.Connected`, instances with no stored NCT salt now force a one-time
+  `regular_high` app-state sync (`fullSync=true`, `onlyIfNotSynced=false`) so
+  accounts paired before NCT support can backfill `whatsmeow_nct_salt` when the
+  server provides it.
+
+### Docs
+- Added operational diagnostics for WhatsApp `463` responses, including
+  `whatsmeow_nct_salt`, `whatsmeow_privacy_tokens`, and `whatsmeow_lid_map`
+  checks. The fix does not bypass legitimate WhatsApp account restrictions,
+  bans, or server-side reach-out time-locks.
+
 ## v0.7.2
 
 **Docker:** `evoapicloud/evolution-go:0.7.2`
@@ -348,4 +365,3 @@ To contribute to the project:
 ---
 
 *Last updated: October 2025*
-
