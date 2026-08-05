@@ -22,6 +22,7 @@ type LabelService interface {
 	ChatUnlabel(data *ChatLabelStruct, instance *instance_model.Instance) error
 	MessageUnlabel(data *MessageLabelStruct, instance *instance_model.Instance) error
 	GetLabels(instance *instance_model.Instance) ([]label_model.Label, error)
+	GetLabelsContext(ctx context.Context, instance *instance_model.Instance) ([]label_model.Label, error)
 }
 
 type labelService struct {
@@ -211,12 +212,16 @@ func (l *labelService) MessageUnlabel(data *MessageLabelStruct, instance *instan
 }
 
 func (l *labelService) GetLabels(instance *instance_model.Instance) ([]label_model.Label, error) {
+	return l.GetLabelsContext(context.Background(), instance)
+}
+
+func (l *labelService) GetLabelsContext(ctx context.Context, instance *instance_model.Instance) ([]label_model.Label, error) {
 	_, err := l.ensureClientConnected(instance.Id)
 	if err != nil {
 		return nil, err
 	}
 
-	labels, err := l.labelRepository.GetAllLabelsByInstanceID(instance.Id)
+	labels, err := l.labelRepository.GetAllLabelsByInstanceIDContext(ctx, instance.Id)
 	if err != nil {
 		l.loggerWrapper.GetLogger(instance.Id).LogError("[%s] error fetching labels from database: %v", instance.Id, err)
 		return nil, err

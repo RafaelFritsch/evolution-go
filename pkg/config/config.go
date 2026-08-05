@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"net/url"
@@ -17,50 +18,59 @@ import (
 )
 
 type Config struct {
-	PostgresAuthDB       string
-	postgresUsersDB      string
-	PostgresHost         string
-	PostgresPort         string
-	PostgresUser         string
-	PostgresPassword     string
-	PostgresDB           string
-	DatabaseSaveMessages bool
-	GlobalApiKey         string
-	WaDebug              string
-	LogType              string
-	WebhookFiles         bool
-	ConnectOnStartup     bool
-	OsName               string
-	AmqpUrl              string
-	AmqpGlobalEnabled    bool
-	WebhookUrl           string
-	ClientName           string
-	ApiAudioConverter    string
-	ApiAudioConverterKey string
-	MinioEndpoint        string
-	MinioAccessKey       string
-	MinioSecretKey       string
-	MinioBucket          string
-	MinioUseSSL          bool
-	MinioEnabled         bool
-	MinioRegion          string
-	WhatsappVersionMajor int
-	WhatsappVersionMinor int
-	WhatsappVersionPatch int
-	ProxyProtocol        string
-	ProxyHost            string
-	ProxyPort            string
-	ProxyUsername        string
-	ProxyPassword        string
-	AmqpGlobalEvents     []string
-	AmqpSpecificEvents   []string
-	NatsUrl              string
-	NatsGlobalEnabled    bool
-	NatsGlobalEvents     []string
-	EventIgnoreGroup     bool
-	EventIgnoreStatus    bool
-	QrcodeMaxCount       int
-	CheckUserExists      bool
+	PostgresAuthDB                 string
+	postgresUsersDB                string
+	PostgresHost                   string
+	PostgresPort                   string
+	PostgresUser                   string
+	PostgresPassword               string
+	PostgresDB                     string
+	PostgresUsersMaxOpenConns      int
+	PostgresUsersMaxIdleConns      int
+	PostgresAuthMaxOpenConns       int
+	PostgresAuthMaxIdleConns       int
+	PostgresConnMaxLifetime        time.Duration
+	PostgresConnMaxIdleTime        time.Duration
+	DBQueryTimeout                 time.Duration
+	DatabaseSaveMessages           bool
+	GlobalApiKey                   string
+	WaDebug                        string
+	LogType                        string
+	WebhookFiles                   bool
+	ConnectOnStartup               bool
+	ConnectOnStartupMaxConcurrency int
+	ConnectOnStartupDelay          time.Duration
+	OsName                         string
+	AmqpUrl                        string
+	AmqpGlobalEnabled              bool
+	WebhookUrl                     string
+	ClientName                     string
+	ApiAudioConverter              string
+	ApiAudioConverterKey           string
+	MinioEndpoint                  string
+	MinioAccessKey                 string
+	MinioSecretKey                 string
+	MinioBucket                    string
+	MinioUseSSL                    bool
+	MinioEnabled                   bool
+	MinioRegion                    string
+	WhatsappVersionMajor           int
+	WhatsappVersionMinor           int
+	WhatsappVersionPatch           int
+	ProxyProtocol                  string
+	ProxyHost                      string
+	ProxyPort                      string
+	ProxyUsername                  string
+	ProxyPassword                  string
+	AmqpGlobalEvents               []string
+	AmqpSpecificEvents             []string
+	NatsUrl                        string
+	NatsGlobalEnabled              bool
+	NatsGlobalEvents               []string
+	EventIgnoreGroup               bool
+	EventIgnoreStatus              bool
+	QrcodeMaxCount                 int
+	CheckUserExists                bool
 
 	// Logger configurations
 	LogMaxSize    int
@@ -70,13 +80,98 @@ type Config struct {
 	LogCompress   bool
 }
 
+const (
+	DefaultPostgresMaxOpenConns           = 10
+	DefaultPostgresMaxIdleConns           = 2
+	DefaultPostgresConnMaxLifetime        = 5 * time.Minute
+	DefaultPostgresConnMaxIdleTime        = time.Minute
+	DefaultDBQueryTimeout                 = 5 * time.Second
+	DefaultConnectOnStartupMaxConcurrency = 3
+	DefaultConnectOnStartupDelay          = 250 * time.Millisecond
+)
+
+type DBPoolConfig struct {
+	Name            string
+	MaxOpenConns    int
+	MaxIdleConns    int
+	ConnMaxLifetime time.Duration
+	ConnMaxIdleTime time.Duration
+}
+
+func (c *Config) UsersPoolConfig() DBPoolConfig {
+	return DBPoolConfig{
+		Name:            "users",
+		MaxOpenConns:    c.PostgresUsersMaxOpenConns,
+		MaxIdleConns:    c.PostgresUsersMaxIdleConns,
+		ConnMaxLifetime: c.PostgresConnMaxLifetime,
+		ConnMaxIdleTime: c.PostgresConnMaxIdleTime,
+	}
+}
+
+func (c *Config) AuthPoolConfig() DBPoolConfig {
+	return DBPoolConfig{
+		Name:            "auth",
+		MaxOpenConns:    c.PostgresAuthMaxOpenConns,
+		MaxIdleConns:    c.PostgresAuthMaxIdleConns,
+		ConnMaxLifetime: c.PostgresConnMaxLifetime,
+		ConnMaxIdleTime: c.PostgresConnMaxIdleTime,
+	}
+}
+
+func ApplyDBPool(db *sql.DB, pool DBPoolConfig) {
+	if pool.MaxOpenConns > 0 {
+		db.SetMaxOpenConns(pool.MaxOpenConns)
+	}
+	if pool.MaxIdleConns >= 0 {
+		db.SetMaxIdleConns(pool.MaxIdleConns)
+	}
+	if pool.ConnMaxLifetime > 0 {
+		db.SetConnMaxLifetime(pool.ConnMaxLifetime)
+	}
+	if pool.ConnMaxIdleTime > 0 {
+		db.SetConnMaxIdleTime(pool.ConnMaxIdleTime)
+	}
+}
+
+func parseEnvInt(name string, defaultValue int) int {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return defaultValue
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed < 0 {
+		logger.LogWarn("[CONFIG] invalid %s=%q, using default %d", name, value, defaultValue)
+		return defaultValue
+	}
+	return parsed
+}
+
+func parseEnvDuration(name string, defaultValue time.Duration) time.Duration {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return defaultValue
+	}
+	if parsed, err := time.ParseDuration(value); err == nil && parsed >= 0 {
+		return parsed
+	}
+	seconds, err := strconv.Atoi(value)
+	if err == nil && seconds >= 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	logger.LogWarn("[CONFIG] invalid %s=%q, using default %s", name, value, defaultValue)
+	return defaultValue
+}
+
 // EnsureDBExists connects to postgres (without the target database) and creates it if it doesn't exist.
 func (c *Config) EnsureDBExists(dsn string) error {
-	return ensureDBExists(dsn)
+	return ensureDBExists(dsn, c.DBQueryTimeout)
 }
 
 // ensureDBExists connects to postgres (without the target database) and creates it if it doesn't exist.
-func ensureDBExists(dsn string) error {
+func ensureDBExists(dsn string, timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = DefaultDBQueryTimeout
+	}
 	dbName, adminDSN, err := extractDBNameAndAdminDSN(dsn)
 	if err != nil {
 		return err
@@ -88,15 +183,18 @@ func ensureDBExists(dsn string) error {
 	}
 	defer db.Close()
 
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
 	var exists bool
-	err = db.QueryRow("SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = $1)", dbName).Scan(&exists)
+	err = db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = $1)", dbName).Scan(&exists)
 	if err != nil {
 		return fmt.Errorf("failed to check database existence: %v", err)
 	}
 
 	if !exists {
 		logger.LogInfo("[CONFIG] Database %q not found, creating it automatically...", dbName)
-		_, err = db.Exec(fmt.Sprintf("CREATE DATABASE %q", dbName))
+		_, err = db.ExecContext(ctx, fmt.Sprintf("CREATE DATABASE %q", dbName))
 		if err != nil {
 			return fmt.Errorf("failed to create database %q: %v", dbName, err)
 		}
@@ -141,16 +239,65 @@ func extractDBNameAndAdminDSN(dsn string) (string, string, error) {
 	return dbName, strings.Join(adminParts, " "), nil
 }
 
-func (c *Config) CreateUsersDB() (*gorm.DB, error) {
-	logger.LogDebug("Connecting to database on: %s", c.postgresUsersDB)
+func WithApplicationName(dsn string, applicationName string) string {
+	if applicationName == "" || dsn == "" {
+		return dsn
+	}
+	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
+		u, err := url.Parse(dsn)
+		if err != nil {
+			return dsn
+		}
+		query := u.Query()
+		if query.Get("application_name") == "" {
+			query.Set("application_name", applicationName)
+			u.RawQuery = query.Encode()
+		}
+		return u.String()
+	}
+	if strings.Contains(dsn, "application_name=") {
+		return dsn
+	}
+	return strings.TrimSpace(dsn) + " application_name=" + applicationName
+}
 
+func MaskDSN(dsn string) string {
+	if dsn == "" {
+		return ""
+	}
+	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
+		u, err := url.Parse(dsn)
+		if err != nil {
+			return "<invalid dsn>"
+		}
+		if u.User != nil {
+			username := u.User.Username()
+			if _, hasPassword := u.User.Password(); hasPassword {
+				u.User = url.UserPassword(username, "***")
+			}
+		}
+		return u.String()
+	}
+	parts := strings.Fields(dsn)
+	for i, part := range parts {
+		if strings.HasPrefix(part, "password=") {
+			parts[i] = "password=***"
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+func (c *Config) CreateUsersDB() (*gorm.DB, error) {
 	dbDSN := c.postgresUsersDB
 
 	if c.postgresUsersDB == "" {
 		dbDSN = fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable", c.PostgresHost, c.PostgresPort, c.PostgresUser, c.PostgresPassword, c.PostgresDB)
 	}
 
-	if err := ensureDBExists(dbDSN); err != nil {
+	dbDSN = WithApplicationName(dbDSN, "evogo-users")
+	logger.LogDebug("Connecting to users database on: %s", MaskDSN(dbDSN))
+
+	if err := ensureDBExists(dbDSN, c.DBQueryTimeout); err != nil {
 		logger.LogWarn("[CONFIG] Auto-setup failed (will try connecting anyway): %v", err)
 	}
 
@@ -168,11 +315,10 @@ func (c *Config) CreateUsersDB() (*gorm.DB, error) {
 		return nil, fmt.Errorf("erro ao obter sql.DB do GORM: %v", err)
 	}
 
-	// Configurar pool de conexões para evitar conexões ociosas não fechadas
-	sqlDB.SetMaxOpenConns(25)                 // Máximo de 25 conexões abertas simultaneamente
-	sqlDB.SetMaxIdleConns(5)                  // Máximo de 5 conexões ociosas no pool
-	sqlDB.SetConnMaxLifetime(5 * time.Minute) // Reconectar após 5 minutos para evitar timeouts
-	sqlDB.SetConnMaxIdleTime(1 * time.Minute) // Fechar conexões ociosas após 1 minuto
+	pool := c.UsersPoolConfig()
+	ApplyDBPool(sqlDB, pool)
+	logger.LogInfo("[CONFIG] users DB pool configured: max_open=%d max_idle=%d lifetime=%s idle_time=%s dsn=%s",
+		pool.MaxOpenConns, pool.MaxIdleConns, pool.ConnMaxLifetime, pool.ConnMaxIdleTime, MaskDSN(dbDSN))
 
 	return db, nil
 }
@@ -184,7 +330,8 @@ func (c *Config) CreateAuthDB() (*sql.DB, error) {
 		dbDSN = fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable", c.PostgresHost, c.PostgresPort, c.PostgresUser, c.PostgresPassword, c.PostgresDB)
 	}
 
-	if err := ensureDBExists(dbDSN); err != nil {
+	dbDSN = WithApplicationName(dbDSN, "evogo-auth")
+	if err := ensureDBExists(dbDSN, c.DBQueryTimeout); err != nil {
 		logger.LogWarn("[CONFIG] Auto-setup failed (will try connecting anyway): %v", err)
 	}
 
@@ -193,11 +340,10 @@ func (c *Config) CreateAuthDB() (*sql.DB, error) {
 		return nil, err
 	}
 
-	// Configurar pool de conexões para evitar conexões ociosas não fechadas
-	db.SetMaxOpenConns(25)                 // Máximo de 25 conexões abertas simultaneamente
-	db.SetMaxIdleConns(5)                  // Máximo de 5 conexões ociosas no pool
-	db.SetConnMaxLifetime(5 * time.Minute) // Reconectar após 5 minutos para evitar timeouts
-	db.SetConnMaxIdleTime(1 * time.Minute) // Fechar conexões ociosas após 1 minuto
+	pool := c.AuthPoolConfig()
+	ApplyDBPool(db, pool)
+	logger.LogInfo("[CONFIG] auth DB pool configured: max_open=%d max_idle=%d lifetime=%s idle_time=%s dsn=%s",
+		pool.MaxOpenConns, pool.MaxIdleConns, pool.ConnMaxLifetime, pool.ConnMaxIdleTime, MaskDSN(dbDSN))
 
 	// Testar a conexão
 	err = db.Ping()
@@ -223,6 +369,14 @@ func Load() *Config {
 		logger.LogFatal("[CONFIG] required database configuration variables are missing. Please check your environment configuration.")
 	}
 
+	postgresUsersMaxOpenConns := parseEnvInt(config_env.POSTGRES_USERS_MAX_OPEN_CONNS, DefaultPostgresMaxOpenConns)
+	postgresUsersMaxIdleConns := parseEnvInt(config_env.POSTGRES_USERS_MAX_IDLE_CONNS, DefaultPostgresMaxIdleConns)
+	postgresAuthMaxOpenConns := parseEnvInt(config_env.POSTGRES_AUTH_MAX_OPEN_CONNS, DefaultPostgresMaxOpenConns)
+	postgresAuthMaxIdleConns := parseEnvInt(config_env.POSTGRES_AUTH_MAX_IDLE_CONNS, DefaultPostgresMaxIdleConns)
+	postgresConnMaxLifetime := parseEnvDuration(config_env.POSTGRES_CONN_MAX_LIFETIME, DefaultPostgresConnMaxLifetime)
+	postgresConnMaxIdleTime := parseEnvDuration(config_env.POSTGRES_CONN_MAX_IDLE_TIME, DefaultPostgresConnMaxIdleTime)
+	dbQueryTimeout := parseEnvDuration(config_env.DB_QUERY_TIMEOUT, DefaultDBQueryTimeout)
+
 	databaseSaveMessages := os.Getenv(config_env.DATABASE_SAVE_MESSAGES)
 	panicIfEmpty(config_env.DATABASE_SAVE_MESSAGES, databaseSaveMessages)
 
@@ -244,6 +398,11 @@ func Load() *Config {
 	if connectOnStartup == "" {
 		connectOnStartup = "false"
 	}
+	connectOnStartupMaxConcurrency := parseEnvInt(config_env.CONNECT_ON_STARTUP_MAX_CONCURRENCY, DefaultConnectOnStartupMaxConcurrency)
+	if connectOnStartupMaxConcurrency == 0 {
+		connectOnStartupMaxConcurrency = 1
+	}
+	connectOnStartupDelay := time.Duration(parseEnvInt(config_env.CONNECT_ON_STARTUP_DELAY_MS, int(DefaultConnectOnStartupDelay/time.Millisecond))) * time.Millisecond
 
 	osName := os.Getenv(config_env.OS_NAME)
 
@@ -343,48 +502,57 @@ func Load() *Config {
 	}
 
 	config := &Config{
-		PostgresAuthDB:       postgresAuthDB,
-		postgresUsersDB:      postgresUsersDB,
-		DatabaseSaveMessages: databaseSaveMessages == "true",
-		GlobalApiKey:         globalApiKey,
-		WaDebug:              waDebug,
-		LogType:              logType,
-		WebhookFiles:         webhookFiles == "true",
-		ConnectOnStartup:     connectOnStartup == "true",
-		OsName:               osName,
-		AmqpUrl:              amqpUrl,
-		AmqpGlobalEnabled:    amqpGlobalEnabled == "true",
-		WebhookUrl:           webhookUrl,
-		ClientName:           clientName,
-		ApiAudioConverter:    apiAudioConverter,
-		ApiAudioConverterKey: apiAudioConverterKey,
-		PostgresHost:         postgresHost,
-		PostgresPort:         postgresPort,
-		PostgresUser:         postgresUser,
-		PostgresPassword:     postgresPassword,
-		PostgresDB:           postgresDB,
-		WhatsappVersionMajor: major,
-		WhatsappVersionMinor: minor,
-		WhatsappVersionPatch: patch,
-		ProxyProtocol:        proxyProtocol,
-		ProxyHost:            proxyHost,
-		ProxyPort:            proxyPort,
-		ProxyUsername:        proxyUsername,
-		ProxyPassword:        proxyPassword,
-		EventIgnoreGroup:     eventIgnoreGroup == "true",
-		EventIgnoreStatus:    eventIgnoreStatus == "true",
-		QrcodeMaxCount:       qrMaxCount,
-		CheckUserExists:      checkUserExists != "false", // Default true, set to false to disable
-		AmqpGlobalEvents:     amqpGlobalEvents,
-		AmqpSpecificEvents:   amqpSpecificEvents,
-		NatsUrl:              natsUrl,
-		NatsGlobalEnabled:    natsGlobalEnabled == "true",
-		NatsGlobalEvents:     natsGlobalEvents,
-		LogMaxSize:           logMaxSize,
-		LogMaxBackups:        logMaxBackups,
-		LogMaxAge:            logMaxAge,
-		LogDirectory:         logDirectory,
-		LogCompress:          logCompress,
+		PostgresAuthDB:                 postgresAuthDB,
+		postgresUsersDB:                postgresUsersDB,
+		PostgresUsersMaxOpenConns:      postgresUsersMaxOpenConns,
+		PostgresUsersMaxIdleConns:      postgresUsersMaxIdleConns,
+		PostgresAuthMaxOpenConns:       postgresAuthMaxOpenConns,
+		PostgresAuthMaxIdleConns:       postgresAuthMaxIdleConns,
+		PostgresConnMaxLifetime:        postgresConnMaxLifetime,
+		PostgresConnMaxIdleTime:        postgresConnMaxIdleTime,
+		DBQueryTimeout:                 dbQueryTimeout,
+		DatabaseSaveMessages:           databaseSaveMessages == "true",
+		GlobalApiKey:                   globalApiKey,
+		WaDebug:                        waDebug,
+		LogType:                        logType,
+		WebhookFiles:                   webhookFiles == "true",
+		ConnectOnStartup:               connectOnStartup == "true",
+		ConnectOnStartupMaxConcurrency: connectOnStartupMaxConcurrency,
+		ConnectOnStartupDelay:          connectOnStartupDelay,
+		OsName:                         osName,
+		AmqpUrl:                        amqpUrl,
+		AmqpGlobalEnabled:              amqpGlobalEnabled == "true",
+		WebhookUrl:                     webhookUrl,
+		ClientName:                     clientName,
+		ApiAudioConverter:              apiAudioConverter,
+		ApiAudioConverterKey:           apiAudioConverterKey,
+		PostgresHost:                   postgresHost,
+		PostgresPort:                   postgresPort,
+		PostgresUser:                   postgresUser,
+		PostgresPassword:               postgresPassword,
+		PostgresDB:                     postgresDB,
+		WhatsappVersionMajor:           major,
+		WhatsappVersionMinor:           minor,
+		WhatsappVersionPatch:           patch,
+		ProxyProtocol:                  proxyProtocol,
+		ProxyHost:                      proxyHost,
+		ProxyPort:                      proxyPort,
+		ProxyUsername:                  proxyUsername,
+		ProxyPassword:                  proxyPassword,
+		EventIgnoreGroup:               eventIgnoreGroup == "true",
+		EventIgnoreStatus:              eventIgnoreStatus == "true",
+		QrcodeMaxCount:                 qrMaxCount,
+		CheckUserExists:                checkUserExists != "false", // Default true, set to false to disable
+		AmqpGlobalEvents:               amqpGlobalEvents,
+		AmqpSpecificEvents:             amqpSpecificEvents,
+		NatsUrl:                        natsUrl,
+		NatsGlobalEnabled:              natsGlobalEnabled == "true",
+		NatsGlobalEvents:               natsGlobalEvents,
+		LogMaxSize:                     logMaxSize,
+		LogMaxBackups:                  logMaxBackups,
+		LogMaxAge:                      logMaxAge,
+		LogDirectory:                   logDirectory,
+		LogCompress:                    logCompress,
 	}
 
 	minioEnabled := os.Getenv(config_env.MINIO_ENABLED) == "true"

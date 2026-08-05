@@ -29,6 +29,7 @@ import (
 	community_service "github.com/evolution-foundation/evolution-go/pkg/community/service"
 	config "github.com/evolution-foundation/evolution-go/pkg/config"
 	"github.com/evolution-foundation/evolution-go/pkg/core"
+	"github.com/evolution-foundation/evolution-go/pkg/dbstats"
 	producer_interfaces "github.com/evolution-foundation/evolution-go/pkg/events/interfaces"
 	nats_producer "github.com/evolution-foundation/evolution-go/pkg/events/nats"
 	rabbitmq_producer "github.com/evolution-foundation/evolution-go/pkg/events/rabbitmq"
@@ -82,7 +83,7 @@ func init() {
 	}
 }
 
-func setupRouter(db *gorm.DB, authDB *sql.DB, sqliteDB *sql.DB, config *config.Config, conn *amqp.Connection, exPath string, runtimeCtx *core.RuntimeContext) *gin.Engine {
+func setupRouter(db *gorm.DB, usersSQLDB *sql.DB, authDB *sql.DB, sqliteDB *sql.DB, config *config.Config, conn *amqp.Connection, exPath string, runtimeCtx *core.RuntimeContext) *gin.Engine {
 	killChannel := make(map[string](chan bool))
 	clientPointer := make(map[string]*whatsmeow.Client)
 
@@ -158,14 +159,15 @@ func setupRouter(db *gorm.DB, authDB *sql.DB, sqliteDB *sql.DB, config *config.C
 		}
 	}
 
-	instanceRepository := instance_repository.NewInstanceRepository(db)
-	messageRepository := message_repository.NewMessageRepository(db)
-	labelRepository := label_repository.NewLabelRepository(db)
+	instanceRepository := instance_repository.NewInstanceRepositoryWithTimeout(db, config.DBQueryTimeout)
+	messageRepository := message_repository.NewMessageRepositoryWithTimeout(db, config.DBQueryTimeout)
+	labelRepository := label_repository.NewLabelRepositoryWithTimeout(db, config.DBQueryTimeout)
 
 	whatsmeowService := whatsmeow_service.NewWhatsmeowService(
 		instanceRepository,
 		authDB,
-		message_repository.NewMessageRepository(db),
+		usersSQLDB,
+		message_repository.NewMessageRepositoryWithTimeout(db, config.DBQueryTimeout),
 		labelRepository,
 		config,
 		killChannel,
@@ -201,6 +203,17 @@ func setupRouter(db *gorm.DB, authDB *sql.DB, sqliteDB *sql.DB, config *config.C
 	pollHandler := poll_handler.NewPollHandler(whatsmeowService.GetPollService(), loggerWrapper)
 
 	r := gin.Default()
+
+	r.Use(func(c *gin.Context) {
+		if config.DBQueryTimeout <= 0 {
+			c.Next()
+			return
+		}
+		ctx, cancel := context.WithTimeout(c.Request.Context(), config.DBQueryTimeout)
+		defer cancel()
+		c.Request = c.Request.WithContext(ctx)
+		c.Next()
+	})
 
 	// CORS middleware — must be before everything else
 	r.Use(func(c *gin.Context) {
@@ -297,25 +310,25 @@ func initAuthDB(config *config.Config) (*sql.DB, string, error) {
 	return db, exPath, nil
 }
 
-func initPostgresAuthDB(config *config.Config) (*sql.DB, error) {
-	if config.PostgresAuthDB == "" {
+func initPostgresAuthDB(cfg *config.Config) (*sql.DB, error) {
+	if cfg.PostgresAuthDB == "" {
 		return nil, nil
 	}
 
-	if err := config.EnsureDBExists(config.PostgresAuthDB); err != nil {
+	if err := cfg.EnsureDBExists(cfg.PostgresAuthDB); err != nil {
 		logger.LogWarn("Auto-setup auth DB failed (will try connecting anyway): %v", err)
 	}
 
-	db, err := sql.Open("postgres", config.PostgresAuthDB)
+	dbDSN := config.WithApplicationName(cfg.PostgresAuthDB, "evogo-auth")
+	db, err := sql.Open("postgres", dbDSN)
 	if err != nil {
 		return nil, fmt.Errorf("erro ao conectar ao banco AUTH PostgreSQL: %v", err)
 	}
 
-	// Configurar pool de conexões para evitar conexões ociosas não fechadas
-	db.SetMaxOpenConns(25)                 // Máximo de 25 conexões abertas simultaneamente
-	db.SetMaxIdleConns(5)                  // Máximo de 5 conexões ociosas no pool
-	db.SetConnMaxLifetime(5 * time.Minute) // Reconectar após 5 minutos para evitar timeouts
-	db.SetConnMaxIdleTime(1 * time.Minute) // Fechar conexões ociosas após 1 minuto
+	pool := cfg.AuthPoolConfig()
+	config.ApplyDBPool(db, pool)
+	logger.LogInfo("AUTH PostgreSQL pool configured: max_open=%d max_idle=%d lifetime=%s idle_time=%s dsn=%s",
+		pool.MaxOpenConns, pool.MaxIdleConns, pool.ConnMaxLifetime, pool.ConnMaxIdleTime, config.MaskDSN(dbDSN))
 
 	err = db.Ping()
 	if err != nil {
@@ -348,6 +361,11 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	usersSQLDB, err := db.DB()
+	if err != nil {
+		log.Fatal(err)
+	}
+	dbstats.Register("users", usersSQLDB)
 
 	// Inicializar PostgreSQL AUTH
 	authDB, err := initPostgresAuthDB(cfg)
@@ -355,6 +373,7 @@ func main() {
 		log.Fatal(err)
 	}
 	if authDB != nil {
+		dbstats.Register("auth", authDB)
 		defer authDB.Close()
 	}
 
@@ -370,7 +389,7 @@ func main() {
 	migrate(db)
 
 	// Initialize core DB + license runtime
-	core.SetDB(db)
+	core.SetDBWithTimeout(db, cfg.DBQueryTimeout)
 	if err := core.MigrateDB(); err != nil {
 		log.Fatal("Failed to migrate runtime_configs: ", err)
 	}
@@ -405,13 +424,14 @@ func main() {
 		logger.LogInfo("RabbitMQ URL not configured, skipping RabbitMQ connection")
 	}
 
-	r := setupRouter(db, authDB, sqliteDB, cfg, conn, exPath, runtimeCtx)
+	r := setupRouter(db, usersSQLDB, authDB, sqliteDB, cfg, conn, exPath, runtimeCtx)
 
 	// Graceful shutdown with heartbeat
 	heartbeatCtx, heartbeatCancel := context.WithCancel(context.Background())
 	defer heartbeatCancel()
 
 	core.StartHeartbeat(heartbeatCtx, runtimeCtx, startTime)
+	dbstats.StartLogger(heartbeatCtx, time.Minute)
 
 	srv := &http.Server{
 		Addr:    ":" + os.Getenv("SERVER_PORT"),
@@ -441,6 +461,10 @@ func main() {
 
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		logger.LogError("[SHUTDOWN] Server forced to shutdown: %v", err)
+	}
+
+	if err := usersSQLDB.Close(); err != nil {
+		logger.LogError("[SHUTDOWN] Failed to close users database pool: %v", err)
 	}
 
 	logger.LogInfo("[SHUTDOWN] Server exited")

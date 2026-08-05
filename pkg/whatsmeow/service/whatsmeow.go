@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/image/webp"
@@ -79,6 +80,7 @@ type clientVersion struct {
 type whatsmeowService struct {
 	instanceRepository instance_repository.InstanceRepository
 	authDB             *sql.DB
+	usersDB            *sql.DB
 	messageRepository  message_repository.MessageRepository
 	labelRepository    label_repository.LabelRepository
 	pollService        poll_service.PollService // NOVO: Serviço de enquetes
@@ -246,8 +248,13 @@ func (w whatsmeowService) ForceUpdateJid(instanceId string, number string) error
 	}
 
 	if instance.Jid == "" && number != "" {
-		sqlDeviceSearch := fmt.Sprintf("SELECT jid FROM whatsmeow_device WHERE jid LIKE '%%%s%%'", number)
-		rows, err := w.authDB.Query(sqlDeviceSearch)
+		if w.authDB == nil {
+			return fmt.Errorf("auth database is not configured")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), w.config.DBQueryTimeout)
+		defer cancel()
+
+		rows, err := w.authDB.QueryContext(ctx, "SELECT jid FROM whatsmeow_device WHERE jid LIKE $1", "%"+number+"%")
 		if err != nil {
 			w.loggerWrapper.GetLogger(instanceId).LogError("[%s] Error getting device: %v", instanceId, err)
 			return err
@@ -325,7 +332,9 @@ func (w whatsmeowService) getAuthContainer() (*sqlstore.Container, error) {
 		}
 
 		container := sqlstore.NewWithDB(w.authDB, "postgres", dbLog)
-		if err := container.Upgrade(context.Background()); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), w.config.DBQueryTimeout)
+		defer cancel()
+		if err := container.Upgrade(ctx); err != nil {
 			return nil, fmt.Errorf("failed to upgrade PostgreSQL auth database: %w", err)
 		}
 
@@ -352,7 +361,9 @@ func (w whatsmeowService) getAuthContainer() (*sqlstore.Container, error) {
 	db.SetMaxIdleConns(1)
 
 	container := sqlstore.NewWithDB(db, "sqlite", dbLog)
-	if err := container.Upgrade(context.Background()); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), w.config.DBQueryTimeout)
+	defer cancel()
+	if err := container.Upgrade(ctx); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("failed to upgrade SQLite auth database: %w", err)
 	}
@@ -2472,14 +2483,46 @@ func (w whatsmeowService) ConnectOnStartup(clientName string) {
 
 	w.loggerWrapper.GetLogger(clientName).LogInfo("[%s] Found %d connected instances", clientName, len(instances))
 
-	for _, instance := range instances {
-		w.loggerWrapper.GetLogger(clientName).LogInfo("[%s] Starting client for user '%s'", clientName, instance.Id)
-
-		err := w.StartInstance(instance.Id)
-		if err != nil {
-			w.loggerWrapper.GetLogger(clientName).LogError("[%s] Error starting client: %s", clientName, err)
-		}
+	if len(instances) == 0 {
+		return
 	}
+
+	maxConcurrency := w.config.ConnectOnStartupMaxConcurrency
+	if maxConcurrency <= 0 {
+		maxConcurrency = 1
+	}
+	delay := w.config.ConnectOnStartupDelay
+	w.loggerWrapper.GetLogger(clientName).LogInfo("[%s] Startup connection limits: max_concurrency=%d delay=%s", clientName, maxConcurrency, delay)
+
+	sem := make(chan struct{}, maxConcurrency)
+	var wg sync.WaitGroup
+	var started int64
+	var failed int64
+
+	for _, instance := range instances {
+		instance := instance
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+
+		sem <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			w.loggerWrapper.GetLogger(clientName).LogInfo("[%s] Starting client for user '%s'", clientName, instance.Id)
+			if err := w.StartInstance(instance.Id); err != nil {
+				atomic.AddInt64(&failed, 1)
+				w.loggerWrapper.GetLogger(clientName).LogError("[%s] Error starting client %s: %s", clientName, instance.Id, err)
+				return
+			}
+			atomic.AddInt64(&started, 1)
+		}()
+	}
+
+	wg.Wait()
+	w.loggerWrapper.GetLogger(clientName).LogInfo("[%s] Startup connection complete: started=%d failed=%d total=%d", clientName, started, failed, len(instances))
 }
 
 func getExtensionFromMimeType(mimeType string) string {
@@ -2835,6 +2878,7 @@ func (w whatsmeowService) ClearInstanceCache(instanceId string, token string) er
 func NewWhatsmeowService(
 	instanceRepository instance_repository.InstanceRepository,
 	authDB *sql.DB,
+	usersDB *sql.DB,
 	messageRepository message_repository.MessageRepository,
 	labelRepository label_repository.LabelRepository,
 	config *config.Config,
@@ -2849,12 +2893,15 @@ func NewWhatsmeowService(
 	natsProducer producer_interfaces.Producer,
 	loggerWrapper *logger_wrapper.LoggerManager,
 ) WhatsmeowService {
-	// Inicializar PollService de forma segura
-	pollSvc := poll_service.NewPollService(authDB, loggerWrapper)
+	pollSvc := poll_service.NewPollServiceWithTimeout(usersDB, loggerWrapper, config.DBQueryTimeout)
+	if err := poll_service.MigratePollVotes(context.Background(), authDB, usersDB, loggerWrapper, config.DBQueryTimeout); err != nil {
+		loggerWrapper.GetLogger("poll-service").LogWarn("[POLL] Failed to migrate poll votes from auth DB to users DB: %v", err)
+	}
 
 	return &whatsmeowService{
 		instanceRepository: instanceRepository,
 		authDB:             authDB,
+		usersDB:            usersDB,
 		messageRepository:  messageRepository,
 		labelRepository:    labelRepository,
 		pollService:        pollSvc, // NOVO: Serviço de enquetes

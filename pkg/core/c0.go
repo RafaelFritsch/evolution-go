@@ -29,7 +29,7 @@ var _k0 = []byte{0xbb, 0xa4, 0x35, 0x2a, 0x05, 0x9d, 0x6f, 0xae, 0x28, 0xc1, 0xc
 
 var (
 	_6np1 string
-	_96    string
+	_96   string
 )
 
 func _cdo() string {
@@ -145,11 +145,11 @@ func _3ya(resp *http.Response) error {
 }
 
 type RuntimeConfig struct {
-	ID         uint      `gorm:"primaryKey;autoIncrement" json:"id"`
-	Key        string    `gorm:"uniqueIndex;size:100;not null" json:"key"`
-	Value      string    `gorm:"type:text;not null" json:"value"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	ID        uint      `gorm:"primaryKey;autoIncrement" json:"id"`
+	Key       string    `gorm:"uniqueIndex;size:100;not null" json:"key"`
+	Value     string    `gorm:"type:text;not null" json:"value"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 func (RuntimeConfig) TableName() string {
@@ -163,25 +163,51 @@ const (
 	ConfigKeyCustomerID = "customer_id"
 )
 
-var _k4 *gorm.DB
+var (
+	_k4        *gorm.DB
+	_k4Timeout = 5 * time.Second
+)
 
 func SetDB(db *gorm.DB) {
 	_k4 = db
+}
+
+func SetDBWithTimeout(db *gorm.DB, timeout time.Duration) {
+	_k4 = db
+	if timeout > 0 {
+		_k4Timeout = timeout
+	}
+}
+
+func _dbWithTimeout(ctx context.Context) (*gorm.DB, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if _k4Timeout <= 0 {
+		return _k4.WithContext(ctx), func() {}
+	}
+	ctx, cancel := context.WithTimeout(ctx, _k4Timeout)
+	return _k4.WithContext(ctx), cancel
 }
 
 func MigrateDB() error {
 	if _k4 == nil {
 		return fmt.Errorf("core: database not set, call SetDB first")
 	}
-	return _k4.AutoMigrate(&RuntimeConfig{})
+	db, cancel := _dbWithTimeout(context.Background())
+	defer cancel()
+	return db.AutoMigrate(&RuntimeConfig{})
 }
 
 func _at(key string) (string, error) {
 	if _k4 == nil {
 		return "", fmt.Errorf("core: database not set")
 	}
+	db, cancel := _dbWithTimeout(context.Background())
+	defer cancel()
+
 	var _33 RuntimeConfig
-	_tmzn := _k4.Where("key = ?", key).First(&_33)
+	_tmzn := db.Where("key = ?", key).First(&_33)
 	if _tmzn.Error != nil {
 		return "", _tmzn.Error
 	}
@@ -192,19 +218,24 @@ func _yy(key, value string) error {
 	if _k4 == nil {
 		return fmt.Errorf("core: database not set")
 	}
+	db, cancel := _dbWithTimeout(context.Background())
+	defer cancel()
+
 	var _33 RuntimeConfig
-	_tmzn := _k4.Where("key = ?", key).First(&_33)
+	_tmzn := db.Where("key = ?", key).First(&_33)
 	if _tmzn.Error != nil {
-		return _k4.Create(&RuntimeConfig{Key: key, Value: value}).Error
+		return db.Create(&RuntimeConfig{Key: key, Value: value}).Error
 	}
-	return _k4.Model(&_33).Update("value", value).Error
+	return db.Model(&_33).Update("value", value).Error
 }
 
 func _ettg(key string) {
 	if _k4 == nil {
 		return
 	}
-	_k4.Where("key = ?", key).Delete(&RuntimeConfig{})
+	db, cancel := _dbWithTimeout(context.Background())
+	defer cancel()
+	db.Where("key = ?", key).Delete(&RuntimeConfig{})
 }
 
 type RuntimeData struct {
@@ -374,18 +405,18 @@ const (
 )
 
 type RuntimeContext struct {
-	_kni       string
+	_kni  string
 	_pl87 string // GLOBAL_API_KEY from .env — used as token for licensing check
-	_z14   string
-	_txz       atomic.Bool
-	_s6a      [32]byte // Derived from activation — required by ValidateContext
-	mu           sync.RWMutex
-	_v8       string // Registration URL shown to users before activation
-	_0z9m     string // Registration token for polling
-	_b56         string
-	_64      string
-	_hpv      atomic.Int64 // Messages sent since last heartbeat
-	_ti9      atomic.Int64 // Messages received since last heartbeat
+	_z14  string
+	_txz  atomic.Bool
+	_s6a  [32]byte // Derived from activation — required by ValidateContext
+	mu    sync.RWMutex
+	_v8   string // Registration URL shown to users before activation
+	_0z9m string // Registration token for polling
+	_b56  string
+	_64   string
+	_hpv  atomic.Int64 // Messages sent since last heartbeat
+	_ti9  atomic.Int64 // Messages received since last heartbeat
 }
 
 var _rs atomic.Pointer[RuntimeContext]
@@ -447,8 +478,8 @@ func InitializeRuntime(_b56, _64, _pl87 string) *RuntimeContext {
 	}
 
 	rc := &RuntimeContext{
-		_b56:         _b56,
-		_64:      _64,
+		_b56:  _b56,
+		_64:   _64,
 		_pl87: _pl87,
 	}
 
@@ -785,7 +816,7 @@ func LicenseRoutes(eng *gin.Engine, rc *RuntimeContext) {
 
 			exchangeResp, err := _dtnx("/v1/register/exchange", map[string]string{
 				"authorization_code": code,
-				"instance_id":       rc._z14,
+				"instance_id":        rc._z14,
 			})
 			if err != nil {
 				c.JSON(http.StatusBadGateway, gin.H{

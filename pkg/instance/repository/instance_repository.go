@@ -1,8 +1,11 @@
 package instance_repository
 
 import (
+	"context"
 	"fmt"
+	"time"
 
+	"github.com/evolution-foundation/evolution-go/pkg/config"
 	instance_model "github.com/evolution-foundation/evolution-go/pkg/instance/model"
 	"github.com/gomessguii/logger"
 	"github.com/google/uuid"
@@ -20,6 +23,7 @@ type InstanceRepository interface {
 	GetInstanceByID(instanceId string) (*instance_model.Instance, error)
 	GetConnectedInstanceByID(instanceId string) (*instance_model.Instance, error)
 	GetInstanceByToken(token string) (*instance_model.Instance, error)
+	GetInstanceByTokenContext(ctx context.Context, token string) (*instance_model.Instance, error)
 	GetInstanceByName(name string) (*instance_model.Instance, error)
 	Update(*instance_model.Instance) error
 	UpdateConnected(userId string, status bool, disconnectReason string) error
@@ -35,21 +39,43 @@ type InstanceRepository interface {
 }
 
 type instanceRepository struct {
-	db          *gorm.DB
-	labelRepo   label_repository.LabelRepository
-	messageRepo message_repository.MessageRepository
+	db           *gorm.DB
+	queryTimeout time.Duration
+	labelRepo    label_repository.LabelRepository
+	messageRepo  message_repository.MessageRepository
+}
+
+func (i *instanceRepository) dbWithTimeout(ctx context.Context) (*gorm.DB, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if i.queryTimeout <= 0 {
+		return i.db.WithContext(ctx), func() {}
+	}
+	ctx, cancel := context.WithTimeout(ctx, i.queryTimeout)
+	return i.db.WithContext(ctx), cancel
 }
 
 func (i *instanceRepository) Create(instance instance_model.Instance) (*instance_model.Instance, error) {
-	if err := i.db.Create(&instance).Error; err != nil {
+	db, cancel := i.dbWithTimeout(context.Background())
+	defer cancel()
+
+	if err := db.Create(&instance).Error; err != nil {
 		return nil, err
 	}
 	return &instance, nil
 }
 
 func (i *instanceRepository) GetInstanceByToken(token string) (*instance_model.Instance, error) {
+	return i.GetInstanceByTokenContext(context.Background(), token)
+}
+
+func (i *instanceRepository) GetInstanceByTokenContext(ctx context.Context, token string) (*instance_model.Instance, error) {
+	db, cancel := i.dbWithTimeout(ctx)
+	defer cancel()
+
 	var instance instance_model.Instance
-	err := i.db.Where("token = ?", token).First(&instance).Error
+	err := db.Where("token = ?", token).First(&instance).Error
 	if err != nil {
 		return nil, err
 	}
@@ -58,8 +84,11 @@ func (i *instanceRepository) GetInstanceByToken(token string) (*instance_model.I
 }
 
 func (i *instanceRepository) GetInstanceByName(name string) (*instance_model.Instance, error) {
+	db, cancel := i.dbWithTimeout(context.Background())
+	defer cancel()
+
 	var instance instance_model.Instance
-	err := i.db.Where("name = ?", name).First(&instance).Error
+	err := db.Where("name = ?", name).First(&instance).Error
 	if err != nil {
 		return nil, err
 	}
@@ -73,8 +102,11 @@ func (i *instanceRepository) GetInstanceByID(instanceId string) (*instance_model
 		return nil, fmt.Errorf("invalid UUID format: %v", err)
 	}
 
+	db, cancel := i.dbWithTimeout(context.Background())
+	defer cancel()
+
 	var instance instance_model.Instance
-	err := i.db.Where("id = ?", instanceId).First(&instance).Error
+	err := db.Where("id = ?", instanceId).First(&instance).Error
 	if err != nil {
 		return nil, err
 	}
@@ -83,8 +115,11 @@ func (i *instanceRepository) GetInstanceByID(instanceId string) (*instance_model
 }
 
 func (i *instanceRepository) GetConnectedInstanceByID(instanceId string) (*instance_model.Instance, error) {
+	db, cancel := i.dbWithTimeout(context.Background())
+	defer cancel()
+
 	var instance instance_model.Instance
-	err := i.db.Where("id = ? AND connected = ?", instanceId, true).First(&instance).Error
+	err := db.Where("id = ? AND connected = ?", instanceId, true).First(&instance).Error
 	if err != nil {
 		return nil, err
 	}
@@ -93,7 +128,10 @@ func (i *instanceRepository) GetConnectedInstanceByID(instanceId string) (*insta
 }
 
 func (i *instanceRepository) Update(instance *instance_model.Instance) error {
-	err := i.db.Save(&instance).Error
+	db, cancel := i.dbWithTimeout(context.Background())
+	defer cancel()
+
+	err := db.Save(&instance).Error
 	if err != nil {
 		logger.LogError("Error updating instance in DB: %v", err)
 	}
@@ -101,24 +139,35 @@ func (i *instanceRepository) Update(instance *instance_model.Instance) error {
 }
 
 func (i *instanceRepository) UpdateConnected(userId string, status bool, disconnectReason string) error {
-	return i.db.Model(&instance_model.Instance{}).Where("id = ?", userId).Update("connected", status).Update("disconnect_reason", disconnectReason).Error
+	db, cancel := i.dbWithTimeout(context.Background())
+	defer cancel()
+	return db.Model(&instance_model.Instance{}).Where("id = ?", userId).Update("connected", status).Update("disconnect_reason", disconnectReason).Error
 }
 
 func (i *instanceRepository) UpdateQrcode(userId string, qr string) error {
-	return i.db.Model(&instance_model.Instance{}).Where("id = ?", userId).Update("qrcode", qr).Error
+	db, cancel := i.dbWithTimeout(context.Background())
+	defer cancel()
+	return db.Model(&instance_model.Instance{}).Where("id = ?", userId).Update("qrcode", qr).Error
 }
 
 func (i *instanceRepository) UpdateProxy(userId string, proxy string) error {
-	return i.db.Model(&instance_model.Instance{}).Where("id = ?", userId).Update("proxy", proxy).Error
+	db, cancel := i.dbWithTimeout(context.Background())
+	defer cancel()
+	return db.Model(&instance_model.Instance{}).Where("id = ?", userId).Update("proxy", proxy).Error
 }
 
 func (i *instanceRepository) UpdateJid(userId string, jid string) error {
-	return i.db.Model(&instance_model.Instance{}).Where("id = ?", userId).Update("jid", jid).Error
+	db, cancel := i.dbWithTimeout(context.Background())
+	defer cancel()
+	return db.Model(&instance_model.Instance{}).Where("id = ?", userId).Update("jid", jid).Error
 }
 
 func (i *instanceRepository) GetAllConnectedInstances() ([]*instance_model.Instance, error) {
+	db, cancel := i.dbWithTimeout(context.Background())
+	defer cancel()
+
 	var instances []*instance_model.Instance
-	err := i.db.Where("connected = ?", true).Find(&instances).Error
+	err := db.Where("connected = ?", true).Find(&instances).Error
 	if err != nil {
 		return nil, err
 	}
@@ -127,8 +176,11 @@ func (i *instanceRepository) GetAllConnectedInstances() ([]*instance_model.Insta
 }
 
 func (i *instanceRepository) GetAllConnectedInstancesByClientName(clientName string) ([]*instance_model.Instance, error) {
+	db, cancel := i.dbWithTimeout(context.Background())
+	defer cancel()
+
 	var instances []*instance_model.Instance
-	err := i.db.Where("connected = ? AND client_name = ?", true, clientName).Find(&instances).Error
+	err := db.Where("connected = ? AND client_name = ?", true).Where("client_name = ?", clientName).Find(&instances).Error
 	if err != nil {
 		return nil, err
 	}
@@ -137,8 +189,11 @@ func (i *instanceRepository) GetAllConnectedInstancesByClientName(clientName str
 }
 
 func (i *instanceRepository) GetAll(clientName string) ([]*instance_model.Instance, error) {
+	db, cancel := i.dbWithTimeout(context.Background())
+	defer cancel()
+
 	var instances []*instance_model.Instance
-	err := i.db.Where("client_name = ?", clientName).Find(&instances).Error
+	err := db.Where("client_name = ?", clientName).Find(&instances).Error
 	if err != nil {
 		return nil, err
 	}
@@ -147,7 +202,10 @@ func (i *instanceRepository) GetAll(clientName string) ([]*instance_model.Instan
 }
 
 func (i *instanceRepository) Delete(instanceId string) error {
-	return i.db.Transaction(func(tx *gorm.DB) error {
+	db, cancel := i.dbWithTimeout(context.Background())
+	defer cancel()
+
+	return db.Transaction(func(tx *gorm.DB) error {
 		// Deleta todas as labels associadas à instância
 		if err := tx.Where("instance_id = ?", instanceId).Delete(&label_model.Label{}).Error; err != nil {
 			return fmt.Errorf("erro ao deletar labels: %v", err)
@@ -173,8 +231,11 @@ func (i *instanceRepository) GetAdvancedSettings(instanceId string) (*instance_m
 		return nil, fmt.Errorf("invalid UUID format: %v", err)
 	}
 
+	db, cancel := i.dbWithTimeout(context.Background())
+	defer cancel()
+
 	var instance instance_model.Instance
-	err := i.db.Select("always_online, reject_call, msg_reject_call, read_messages, ignore_groups, ignore_status").
+	err := db.Select("always_online, reject_call, msg_reject_call, read_messages, ignore_groups, ignore_status").
 		Where("id = ?", instanceId).First(&instance).Error
 	if err != nil {
 		return nil, err
@@ -198,6 +259,9 @@ func (i *instanceRepository) UpdateAdvancedSettings(instanceId string, settings 
 		return fmt.Errorf("invalid UUID format: %v", err)
 	}
 
+	db, cancel := i.dbWithTimeout(context.Background())
+	defer cancel()
+
 	updates := map[string]interface{}{
 		"always_online":   settings.AlwaysOnline,
 		"reject_call":     settings.RejectCall,
@@ -207,7 +271,7 @@ func (i *instanceRepository) UpdateAdvancedSettings(instanceId string, settings 
 		"ignore_status":   settings.IgnoreStatus,
 	}
 
-	err := i.db.Model(&instance_model.Instance{}).Where("id = ?", instanceId).Updates(updates).Error
+	err := db.Model(&instance_model.Instance{}).Where("id = ?", instanceId).Updates(updates).Error
 	if err != nil {
 		logger.LogError("Error updating advanced settings in DB: %v", err)
 		return err
@@ -217,7 +281,12 @@ func (i *instanceRepository) UpdateAdvancedSettings(instanceId string, settings 
 }
 
 func NewInstanceRepository(db *gorm.DB) InstanceRepository {
+	return NewInstanceRepositoryWithTimeout(db, config.DefaultDBQueryTimeout)
+}
+
+func NewInstanceRepositoryWithTimeout(db *gorm.DB, queryTimeout time.Duration) InstanceRepository {
 	return &instanceRepository{
-		db: db,
+		db:           db,
+		queryTimeout: queryTimeout,
 	}
 }

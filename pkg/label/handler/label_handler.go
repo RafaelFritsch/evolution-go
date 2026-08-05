@@ -279,7 +279,7 @@ func (l *labelHandler) GetLabels(ctx *gin.Context) {
 		return
 	}
 
-	labels, err := l.labelService.GetLabels(instance)
+	labels, err := l.labelService.GetLabelsContext(ctx.Request.Context(), instance)
 	if err != nil {
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

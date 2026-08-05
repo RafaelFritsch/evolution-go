@@ -25,7 +25,7 @@ func (m middleware) Auth(ctx *gin.Context) {
 		return
 	}
 
-	instance, err := m.instanceService.GetInstanceByToken(token)
+	instance, err := m.instanceService.GetInstanceByTokenContext(ctx.Request.Context(), token)
 	if err != nil {
 		ctx.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "not authorized"})
 		return

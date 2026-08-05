@@ -292,7 +292,7 @@ func (m *messageHandler) GetMessageStatus(ctx *gin.Context) {
 		return
 	}
 
-	message, ts, err := m.messageService.GetMessageStatus(data, instance)
+	message, ts, err := m.messageService.GetMessageStatusContext(ctx.Request.Context(), data, instance)
 	if err != nil {
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

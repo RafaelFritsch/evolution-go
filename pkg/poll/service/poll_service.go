@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/evolution-foundation/evolution-go/pkg/config"
 	logger_wrapper "github.com/evolution-foundation/evolution-go/pkg/logger"
 	"github.com/evolution-foundation/evolution-go/pkg/poll/model"
 	"github.com/google/uuid"
@@ -26,13 +27,24 @@ type PollService interface {
 type pollService struct {
 	db            *sql.DB
 	loggerWrapper *logger_wrapper.LoggerManager
+	queryTimeout  time.Duration
 }
 
 // NewPollService cria uma nova instância do serviço de polls
 func NewPollService(db *sql.DB, loggerWrapper *logger_wrapper.LoggerManager) PollService {
+	return NewPollServiceWithTimeout(db, loggerWrapper, config.DefaultDBQueryTimeout)
+}
+
+func NewPollServiceWithTimeout(db *sql.DB, loggerWrapper *logger_wrapper.LoggerManager, queryTimeout time.Duration) PollService {
 	service := &pollService{
 		db:            db,
 		loggerWrapper: loggerWrapper,
+		queryTimeout:  queryTimeout,
+	}
+
+	if db == nil {
+		loggerWrapper.GetLogger("poll-service").LogWarn("[POLL] PollService initialized without database; poll persistence disabled")
+		return service
 	}
 
 	// Auto-migration: criar tabela se não existir
@@ -43,8 +55,25 @@ func NewPollService(db *sql.DB, loggerWrapper *logger_wrapper.LoggerManager) Pol
 	return service
 }
 
+func (s *pollService) contextWithTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if s.queryTimeout <= 0 {
+		return ctx, func() {}
+	}
+	if _, ok := ctx.Deadline(); ok {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, s.queryTimeout)
+}
+
 // autoMigrate cria a tabela poll_votes se não existir
 func (s *pollService) autoMigrate() error {
+	if s.db == nil {
+		return fmt.Errorf("poll database is not configured")
+	}
+
 	createTableSQL := `
 		CREATE TABLE IF NOT EXISTS poll_votes (
 			id VARCHAR(255) PRIMARY KEY,
@@ -71,7 +100,10 @@ func (s *pollService) autoMigrate() error {
 
 	s.loggerWrapper.GetLogger("poll-service").LogInfo("[POLL] Running auto-migration...")
 
-	_, err := s.db.Exec(createTableSQL)
+	ctx, cancel := s.contextWithTimeout(context.Background())
+	defer cancel()
+
+	_, err := s.db.ExecContext(ctx, createTableSQL)
 	if err != nil {
 		return fmt.Errorf("failed to create poll_votes table: %w", err)
 	}
@@ -81,6 +113,10 @@ func (s *pollService) autoMigrate() error {
 
 // SavePollVote salva um voto de enquete no banco de dados (NÃO-INVASIVO)
 func (s *pollService) SavePollVote(ctx context.Context, vote *model.PollVote) error {
+	if s.db == nil {
+		return fmt.Errorf("poll database is not configured")
+	}
+
 	// Log seguro - não expõe dados sensíveis
 	s.loggerWrapper.GetLogger("poll-service").LogInfo("[POLL] Saving vote for poll %s from %s", vote.PollMessageID, vote.VoterJid)
 
@@ -113,6 +149,9 @@ func (s *pollService) SavePollVote(ctx context.Context, vote *model.PollVote) er
 			received_at = EXCLUDED.received_at
 	`
 
+	ctx, cancel := s.contextWithTimeout(ctx)
+	defer cancel()
+
 	_, err := s.db.ExecContext(ctx, query,
 		vote.ID,
 		vote.CompanyID,
@@ -139,6 +178,10 @@ func (s *pollService) SavePollVote(ctx context.Context, vote *model.PollVote) er
 
 // GetPollResults retorna os resultados agregados de uma enquete
 func (s *pollService) GetPollResults(ctx context.Context, pollMessageID string, instanceID string) (*model.PollResults, error) {
+	if s.db == nil {
+		return nil, fmt.Errorf("poll database is not configured")
+	}
+
 	s.loggerWrapper.GetLogger("poll-service").LogInfo("[POLL] Fetching results for poll %s", pollMessageID)
 
 	query := `
@@ -150,6 +193,9 @@ func (s *pollService) GetPollResults(ctx context.Context, pollMessageID string, 
 		WHERE poll_message_id = $1 AND instance_id = $2
 		ORDER BY voted_at ASC
 	`
+
+	ctx, cancel := s.contextWithTimeout(ctx)
+	defer cancel()
 
 	rows, err := s.db.QueryContext(ctx, query, pollMessageID, instanceID)
 	if err != nil {
@@ -236,6 +282,105 @@ func (s *pollService) GetPollResults(ctx context.Context, pollMessageID string, 
 
 	s.loggerWrapper.GetLogger("poll-service").LogInfo("[POLL] Found %d votes for poll %s", len(votes), pollMessageID)
 	return results, nil
+}
+
+func MigratePollVotes(ctx context.Context, sourceDB *sql.DB, targetDB *sql.DB, loggerWrapper *logger_wrapper.LoggerManager, queryTimeout time.Duration) error {
+	if sourceDB == nil || targetDB == nil {
+		return nil
+	}
+	service := &pollService{db: targetDB, loggerWrapper: loggerWrapper, queryTimeout: queryTimeout}
+	ctx, cancel := service.contextWithTimeout(ctx)
+	defer cancel()
+
+	var exists bool
+	err := sourceDB.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM information_schema.tables
+			WHERE table_schema = 'public' AND table_name = 'poll_votes'
+		)
+	`).Scan(&exists)
+	if err != nil {
+		return fmt.Errorf("failed to check source poll_votes table: %w", err)
+	}
+	if !exists {
+		return nil
+	}
+
+	rows, err := sourceDB.QueryContext(ctx, `
+		SELECT id, company_id, instance_id, poll_message_id, poll_chat_jid,
+			vote_message_id, voter_jid, voter_phone, voter_name,
+			selected_options, voted_at, received_at
+		FROM poll_votes
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to read source poll votes: %w", err)
+	}
+	defer rows.Close()
+
+	query := `
+		INSERT INTO poll_votes (
+			id, company_id, instance_id, poll_message_id, poll_chat_jid,
+			vote_message_id, voter_jid, voter_phone, voter_name,
+			selected_options, voted_at, received_at
+		) VALUES (
+			$1, $2, $3, $4, $5,
+			$6, $7, $8, $9,
+			$10, $11, $12
+		)
+		ON CONFLICT (poll_message_id, voter_jid)
+		DO NOTHING
+	`
+
+	var copied int
+	for rows.Next() {
+		var vote model.PollVote
+		var selectedOptionsStr string
+		if err := rows.Scan(
+			&vote.ID,
+			&vote.CompanyID,
+			&vote.InstanceID,
+			&vote.PollMessageID,
+			&vote.PollChatJid,
+			&vote.VoteMessageID,
+			&vote.VoterJid,
+			&vote.VoterPhone,
+			&vote.VoterName,
+			&selectedOptionsStr,
+			&vote.VotedAt,
+			&vote.ReceivedAt,
+		); err != nil {
+			return fmt.Errorf("failed to scan source poll vote: %w", err)
+		}
+
+		result, err := targetDB.ExecContext(ctx, query,
+			vote.ID,
+			vote.CompanyID,
+			vote.InstanceID,
+			vote.PollMessageID,
+			vote.PollChatJid,
+			vote.VoteMessageID,
+			vote.VoterJid,
+			vote.VoterPhone,
+			vote.VoterName,
+			selectedOptionsStr,
+			vote.VotedAt,
+			vote.ReceivedAt,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to copy poll vote: %w", err)
+		}
+		if affected, _ := result.RowsAffected(); affected > 0 {
+			copied += int(affected)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("error iterating source poll votes: %w", err)
+	}
+
+	if copied > 0 {
+		loggerWrapper.GetLogger("poll-service").LogInfo("[POLL] Copied %d poll votes from auth DB to users DB", copied)
+	}
+	return nil
 }
 
 // Helper para converter []string em formato PostgreSQL array

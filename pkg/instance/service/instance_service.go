@@ -42,6 +42,7 @@ type InstanceService interface {
 	RemoveProxy(id string) error
 	ForceReconnect(instanceId string, number string) error
 	GetInstanceByToken(token string) (*instance_model.Instance, error)
+	GetInstanceByTokenContext(ctx context.Context, token string) (*instance_model.Instance, error)
 	GetLogs(instanceId string, startDate, endDate time.Time, level string, limit int) ([]logger_wrapper.LogEntry, error)
 	GetAdvancedSettings(instanceId string) (*instance_model.AdvancedSettings, error)
 	UpdateAdvancedSettings(instanceId string, settings *instance_model.AdvancedSettings) error
@@ -204,6 +205,10 @@ func (i instances) Create(data *CreateStruct) (*instance_model.Instance, error) 
 	}
 
 	return createdInstance, nil
+}
+
+func (i instances) GetInstanceByTokenContext(ctx context.Context, token string) (*instance_model.Instance, error) {
+	return i.instanceRepository.GetInstanceByTokenContext(ctx, token)
 }
 
 func (i instances) Connect(data *ConnectStruct, instance *instance_model.Instance) (*instance_model.Instance, string, string, error) {

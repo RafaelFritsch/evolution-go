@@ -8,3 +8,5 @@ coverage.*
 .vscode/
 .DS_Store
 /xfiles
+xfiles
+xfiles/

@@ -30,6 +30,7 @@ type MessageService interface {
 	MarkPlayed(data *MarkPlayedStruct, instance *instance_model.Instance) (string, error)
 	DownloadMedia(data *DownloadMediaStruct, instance *instance_model.Instance, request *http.Request) (*dataurl.DataURL, string, error)
 	GetMessageStatus(data *MessageStatusStruct, instance *instance_model.Instance) (*message_model.Message, string, error)
+	GetMessageStatusContext(ctx context.Context, data *MessageStatusStruct, instance *instance_model.Instance) (*message_model.Message, string, error)
 	DeleteMessageEveryone(data *MessageStruct, instance *instance_model.Instance) (string, string, error)
 	EditMessage(data *EditMessageStruct, instance *instance_model.Instance) (string, string, error)
 }
@@ -449,6 +450,10 @@ func (m *messageService) DownloadMedia(data *DownloadMediaStruct, instance *inst
 }
 
 func (m *messageService) GetMessageStatus(data *MessageStatusStruct, instance *instance_model.Instance) (*message_model.Message, string, error) {
+	return m.GetMessageStatusContext(context.Background(), data, instance)
+}
+
+func (m *messageService) GetMessageStatusContext(ctx context.Context, data *MessageStatusStruct, instance *instance_model.Instance) (*message_model.Message, string, error) {
 	_, err := m.ensureClientConnected(instance.Id)
 	if err != nil {
 		return nil, "", err
@@ -456,7 +461,7 @@ func (m *messageService) GetMessageStatus(data *MessageStatusStruct, instance *i
 
 	var ts time.Time
 
-	result, err := m.messageRepository.GetMessageByID(data.Id)
+	result, err := m.messageRepository.GetMessageByIDContext(ctx, data.Id)
 	if err != nil {
 		return nil, "", err
 	}
